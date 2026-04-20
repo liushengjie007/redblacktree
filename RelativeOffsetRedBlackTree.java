@@ -1,3 +1,4 @@
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -153,13 +154,26 @@ public class RelativeOffsetRedBlackTree {
     // -------------------- 内部实现 --------------------
 
     private void inOrder(Node node, long base, List<Long> out) {
-        if (node == null) {
-            return;
+        ArrayDeque<Node> nodeStack = new ArrayDeque<>();
+        ArrayDeque<Long> baseStack = new ArrayDeque<>();
+        Node cur = node;
+        long curBase = base;
+
+        while (cur != null || !nodeStack.isEmpty()) {
+            while (cur != null) {
+                nodeStack.push(cur);
+                baseStack.push(curBase);
+                cur = cur.left;
+            }
+
+            cur = nodeStack.pop();
+            long nodeBase = baseStack.pop();
+            long key = nodeBase + cur.delta;
+            out.add(key);
+
+            curBase = key;
+            cur = cur.right;
         }
-        long key = base + node.delta;
-        inOrder(node.left, base, out);
-        out.add(key);
-        inOrder(node.right, key, out);
     }
 
     private Long lowerBound(long target) {
