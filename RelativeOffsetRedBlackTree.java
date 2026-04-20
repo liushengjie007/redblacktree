@@ -14,9 +14,9 @@ import java.util.List;
  * - 右子树节点以当前节点绝对 key 作为左父基准。
  *
  * 因此，addToKeysFrom(from, delta) 可以在 O(log n) 内完成：
- * - 若当前节点 key >= from：当前节点 delta += delta，递归左子树；
+ * - 若当前节点 key >= from：当前节点 delta += delta，继续进入左子树；
  *   （右子树会因“基准抬升”自动整体平移）
- * - 若当前节点 key < from：递归右子树。
+ * - 若当前节点 key < from：继续进入右子树。
  */
 public class RelativeOffsetRedBlackTree {
     private static final boolean RED = true;
@@ -124,7 +124,19 @@ public class RelativeOffsetRedBlackTree {
                             + ", delta=" + delta);
         }
 
-        addToKeysFrom(root, 0L, fromInclusive, delta);
+        Node cur = root;
+        long base = 0L;
+        while (cur != null) {
+            long key = base + cur.delta;
+            if (key >= fromInclusive) {
+                // 当前节点及其右子树全部受影响：只修改当前节点即可把“右侧基准”整体平移
+                cur.delta += delta;
+                cur = cur.left;
+            } else {
+                base = key;
+                cur = cur.right;
+            }
+        }
     }
 
     public List<Long> keysInOrder() {
@@ -139,20 +151,6 @@ public class RelativeOffsetRedBlackTree {
     }
 
     // -------------------- 内部实现 --------------------
-
-    private void addToKeysFrom(Node node, long base, long fromInclusive, long delta) {
-        if (node == null) {
-            return;
-        }
-        long key = base + node.delta;
-        if (key >= fromInclusive) {
-            // 当前节点及其右子树全部受影响：只修改当前节点即可把“右侧基准”整体平移
-            node.delta += delta;
-            addToKeysFrom(node.left, base, fromInclusive, delta);
-        } else {
-            addToKeysFrom(node.right, key, fromInclusive, delta);
-        }
-    }
 
     private void inOrder(Node node, long base, List<Long> out) {
         if (node == null) {
