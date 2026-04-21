@@ -27,6 +27,11 @@ public class RelativeOffsetRedBlackTreeDemo {
         tree.addToKeysFrom(37, -5);
         keys = tree.keysInOrder();
         assertEquals(keys, List.of(10L, 20L, 32L, 42L, 52L), "basicDemo shift -5");
+
+        assertBoundKey(tree.lowerBound(32), tree, 32L, "lowerBound exact");
+        assertBoundKey(tree.lowerBound(33), tree, 42L, "lowerBound next greater");
+        assertBoundKey(tree.upperBound(42), tree, 52L, "upperBound strict greater");
+        assertBoundKey(tree.upperBound(52), tree, null, "upperBound tail null");
     }
 
     private static void randomizedVerification() {
@@ -106,6 +111,23 @@ public class RelativeOffsetRedBlackTreeDemo {
                 throw new AssertionError(
                         title + " keyAt(" + i + ") mismatch. expected=" + expected.get(i) + ", actual=" + key);
             }
+        }
+    }
+
+    private static void assertBoundKey(
+            RelativeOffsetRedBlackTree.Node node, RelativeOffsetRedBlackTree tree, Long expected, String title) {
+        if (expected == null) {
+            if (node != null) {
+                throw new AssertionError(title + " expected null but got non-null node");
+            }
+            return;
+        }
+        if (node == null) {
+            throw new AssertionError(title + " expected key=" + expected + " but got null node");
+        }
+        long actual = tree.keyOf(node);
+        if (actual != expected) {
+            throw new AssertionError(title + " expected key=" + expected + ", actual=" + actual);
         }
     }
 }

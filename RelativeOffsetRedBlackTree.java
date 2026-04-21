@@ -23,6 +23,18 @@ public class RelativeOffsetRedBlackTree {
     private static final boolean RED = true;
     private static final boolean BLACK = false;
 
+    private static final class BoundResult {
+        private final Node node;
+        private final long key;
+        private final Long predecessor;
+
+        BoundResult(Node node, long key, Long predecessor) {
+            this.node = node;
+            this.key = key;
+            this.predecessor = predecessor;
+        }
+    }
+
     public static final class Node {
         private long delta; // key = leftParentAbsoluteKey + delta
         private int leftCount; // 左子树节点总数（用于下标访问）
@@ -54,6 +66,20 @@ public class RelativeOffsetRedBlackTree {
 
     public boolean isEmpty() {
         return size == 0;
+    }
+
+    /**
+     * 返回第一个 key >= target 的节点，不存在则返回 null。
+     */
+    public Node lowerBound(long target) {
+        return findBound(target, false).node;
+    }
+
+    /**
+     * 返回第一个 key > target 的节点，不存在则返回 null。
+     */
+    public Node upperBound(long target) {
+        return findBound(target, true).node;
     }
 
     /**
@@ -101,6 +127,35 @@ public class RelativeOffsetRedBlackTree {
             }
         }
         throw new IllegalStateException("Broken leftCount index path");
+    }
+
+    /**
+     * 返回指定节点对应的绝对 key。
+     */
+    public long keyOf(Node node) {
+        if (node == null) {
+            throw new IllegalArgumentException("node is null");
+        }
+        ArrayDeque<Node> path = new ArrayDeque<>();
+        Node cur = node;
+        while (cur != null) {
+            path.push(cur);
+            cur = cur.parent;
+        }
+
+        long base = 0L;
+        Node current = path.pop();
+        while (true) {
+            long key = base + current.delta;
+            if (path.isEmpty()) {
+                return key;
+            }
+            Node child = path.pop();
+            if (child == current.right) {
+                base = key;
+            }
+            current = child;
+        }
     }
 
     public boolean contains(long key) {
@@ -174,15 +229,14 @@ public class RelativeOffsetRedBlackTree {
             return;
         }
 
-        Long firstAffected = lowerBound(fromInclusive);
-        if (firstAffected == null) {
+        BoundResult firstAffected = findBound(fromInclusive, false);
+        if (firstAffected.node == null) {
             return;
         }
-        Long predecessor = predecessorOf(firstAffected);
-        if (predecessor != null && firstAffected + delta <= predecessor) {
+        if (firstAffected.predecessor != null && firstAffected.key + delta <= firstAffected.predecessor) {
             throw new IllegalArgumentException(
-                    "Shift would break BST order: firstAffected=" + firstAffected
-                            + ", predecessor=" + predecessor
+                    "Shift would break BST order: firstAffected=" + firstAffected.key
+                            + ", predecessor=" + firstAffected.predecessor
                             + ", delta=" + delta);
         }
 
@@ -237,38 +291,26 @@ public class RelativeOffsetRedBlackTree {
         }
     }
 
-    private Long lowerBound(long target) {
+    private BoundResult findBound(long target, boolean strictGreater) {
         Node cur = root;
         long base = 0L;
-        Long candidate = null;
+        Node candidateNode = null;
+        long candidateKey = 0L;
+        Long predecessor = null;
         while (cur != null) {
             long key = base + cur.delta;
-            if (key >= target) {
-                candidate = key;
+            boolean isCandidate = strictGreater ? key > target : key >= target;
+            if (isCandidate) {
+                candidateNode = cur;
+                candidateKey = key;
                 cur = cur.left;
             } else {
+                predecessor = key;
                 base = key;
                 cur = cur.right;
             }
         }
-        return candidate;
-    }
-
-    private Long predecessorOf(long key) {
-        Node cur = root;
-        long base = 0L;
-        Long predecessor = null;
-        while (cur != null) {
-            long curKey = base + cur.delta;
-            if (curKey < key) {
-                predecessor = curKey;
-                base = curKey;
-                cur = cur.right;
-            } else {
-                cur = cur.left;
-            }
-        }
-        return predecessor;
+        return new BoundResult(candidateNode, candidateKey, predecessor);
     }
 
     private void rotateLeft(Node x) {
