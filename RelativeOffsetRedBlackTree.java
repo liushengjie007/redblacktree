@@ -23,16 +23,25 @@ public class RelativeOffsetRedBlackTree {
     private static final boolean RED = true;
     private static final boolean BLACK = false;
 
-    private static final class Node {
-        long delta; // key = leftParentAbsoluteKey + delta
-        boolean color;
-        Node left;
-        Node right;
-        Node parent;
+    public static final class Node {
+        private long delta; // key = leftParentAbsoluteKey + delta
+        private int leftCount; // 左子树节点总数（用于下标访问）
+        private boolean color;
+        private Node left;
+        private Node right;
+        private Node parent;
 
         Node(long delta, boolean color) {
             this.delta = delta;
             this.color = color;
+        }
+
+        public long getDelta() {
+            return delta;
+        }
+
+        public int getLeftCount() {
+            return leftCount;
         }
     }
 
@@ -45,6 +54,53 @@ public class RelativeOffsetRedBlackTree {
 
     public boolean isEmpty() {
         return size == 0;
+    }
+
+    /**
+     * 按中序顺序返回第 index 个节点（0-based）。
+     */
+    public Node at(int index) {
+        if (index < 0 || index >= size) {
+            throw new IndexOutOfBoundsException("index=" + index + ", size=" + size);
+        }
+        Node cur = root;
+        int rank = index;
+        while (cur != null) {
+            if (rank < cur.leftCount) {
+                cur = cur.left;
+            } else if (rank == cur.leftCount) {
+                return cur;
+            } else {
+                rank -= cur.leftCount + 1;
+                cur = cur.right;
+            }
+        }
+        throw new IllegalStateException("Broken leftCount index path");
+    }
+
+    /**
+     * 按中序顺序返回第 index 个 key（0-based）。
+     */
+    public long keyAt(int index) {
+        if (index < 0 || index >= size) {
+            throw new IndexOutOfBoundsException("index=" + index + ", size=" + size);
+        }
+        Node cur = root;
+        int rank = index;
+        long base = 0L;
+        while (cur != null) {
+            long key = base + cur.delta;
+            if (rank < cur.leftCount) {
+                cur = cur.left;
+            } else if (rank == cur.leftCount) {
+                return key;
+            } else {
+                rank -= cur.leftCount + 1;
+                base = key;
+                cur = cur.right;
+            }
+        }
+        throw new IllegalStateException("Broken leftCount index path");
     }
 
     public boolean contains(long key) {
@@ -75,11 +131,13 @@ public class RelativeOffsetRedBlackTree {
         Node cur = root;
         long base = 0L;
         boolean goRight = false;
+        List<Node> leftPath = new ArrayList<>();
 
         while (cur != null) {
             parent = cur;
             long curKey = base + cur.delta;
             if (key < curKey) {
+                leftPath.add(cur);
                 cur = cur.left;
                 goRight = false;
             } else if (key > curKey) {
@@ -97,6 +155,9 @@ public class RelativeOffsetRedBlackTree {
             parent.right = z;
         } else {
             parent.left = z;
+        }
+        for (Node n : leftPath) {
+            n.leftCount++;
         }
         fixAfterInsert(z);
         size++;
@@ -215,6 +276,8 @@ public class RelativeOffsetRedBlackTree {
         if (y == null) {
             return;
         }
+        int xLeftCount = x.leftCount;
+        int yLeftCount = y.leftCount;
 
         x.right = y.left;
         if (y.left != null) {
@@ -235,6 +298,8 @@ public class RelativeOffsetRedBlackTree {
 
         // y 继承了 x 原先的左父基准，因此 y.delta 需要补上 x.delta。
         y.delta += x.delta;
+        // 旋转后 y 的左子树变为整棵 x 子树。
+        y.leftCount = xLeftCount + yLeftCount + 1;
     }
 
     private void rotateRight(Node y) {
@@ -242,6 +307,9 @@ public class RelativeOffsetRedBlackTree {
         if (x == null) {
             return;
         }
+        int xLeftCount = x.leftCount;
+        int yLeftCount = y.leftCount;
+        int xRightCount = yLeftCount - xLeftCount - 1;
 
         y.left = x.right;
         if (x.right != null) {
@@ -262,6 +330,8 @@ public class RelativeOffsetRedBlackTree {
 
         // y 从“共享旧基准”变为“以 x 为左父基准”，因此要减去 x.delta。
         y.delta -= x.delta;
+        // 旋转后 y 的左子树变为 x 的右子树（旋转前）。
+        y.leftCount = xRightCount;
     }
 
     private void fixAfterInsert(Node z) {

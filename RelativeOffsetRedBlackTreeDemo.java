@@ -75,6 +75,7 @@ public class RelativeOffsetRedBlackTreeDemo {
             List<Long> expected = new ArrayList<>(ref);
             List<Long> actual = tree.keysInOrder();
             assertEquals(actual, expected, "step " + i);
+            assertIndexedAccess(tree, expected, "step " + i);
         }
     }
 
@@ -91,6 +92,20 @@ public class RelativeOffsetRedBlackTreeDemo {
     private static void assertEquals(List<Long> actual, List<Long> expected, String title) {
         if (!actual.equals(expected)) {
             throw new AssertionError(title + " mismatch. expected=" + expected + ", actual=" + actual);
+        }
+    }
+
+    private static void assertIndexedAccess(RelativeOffsetRedBlackTree tree, List<Long> expected, String title) {
+        for (int i = 0; i < expected.size(); i++) {
+            RelativeOffsetRedBlackTree.Node node = tree.at(i);
+            if (node == null) {
+                throw new AssertionError(title + " at(" + i + ") returned null");
+            }
+            long key = tree.keyAt(i);
+            if (key != expected.get(i)) {
+                throw new AssertionError(
+                        title + " keyAt(" + i + ") mismatch. expected=" + expected.get(i) + ", actual=" + key);
+            }
         }
     }
 }
