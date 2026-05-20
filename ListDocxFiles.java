@@ -4,6 +4,9 @@ import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import javax.xml.XMLConstants;
@@ -33,16 +36,23 @@ public class ListDocxFiles {
 
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(directory)) {
             boolean found = false;
+            List<String> results = new ArrayList<>();
             for (Path file : stream) {
                 if (Files.isRegularFile(file)
                         && file.getFileName().toString().toLowerCase().endsWith(".docx")) {
-                    parseDocxFontTable(file);
+                    parseDocxFontTable(file, results);
                     found = true;
                 }
             }
 
             if (!found) {
                 System.out.println("未找到 .docx 文件");
+                return;
+            }
+
+            results.sort(String::compareTo);
+            for (String result : results) {
+                System.out.println(result);
             }
         } catch (IOException e) {
             System.err.println("读取目录失败: " + e.getMessage());
@@ -50,7 +60,7 @@ public class ListDocxFiles {
         }
     }
 
-    private static void parseDocxFontTable(Path docxPath) {
+    private static void parseDocxFontTable(Path docxPath, List<String> results) {
         try (ZipFile zipFile = new ZipFile(docxPath.toFile())) {
             ZipEntry fontTableEntry = zipFile.getEntry("word/fontTable.xml");
             if (fontTableEntry == null) {
@@ -71,9 +81,10 @@ public class ListDocxFiles {
                     Node node = nodes.item(i);
                     if (node.getNodeType() == Node.ELEMENT_NODE
                             && "font".equals(node.getLocalName())) {
-                        StringBuilder builder = new StringBuilder();
-                        appendElementAndChildren((Element) node, builder);
-                        System.out.println(builder.toString().replace("\r", "").replace("\n", ""));
+                        String line = buildElementString((Element) node)
+                                .replace("\r", "")
+                                .replace("\n", "");
+                        results.add(line);
                     }
                 }
             }
@@ -92,35 +103,43 @@ public class ListDocxFiles {
         return builder.parse(inputStream);
     }
 
-    private static void appendElementAndChildren(Element element, StringBuilder builder) {
-        if (builder.length() > 0) {
-            builder.append(' ');
-        }
-        builder.append(element.getNodeName());
-        builder.append('(');
+    private static String buildElementString(Element element) {
+        StringBuilder builder = new StringBuilder();
+        builder.append(element.getNodeName()).append('(');
 
+        List<Node> attributeNodes = new ArrayList<>();
         NamedNodeMap attributes = element.getAttributes();
-        boolean firstAttribute = true;
         for (int i = 0; i < attributes.getLength(); i++) {
             Node attribute = attributes.item(i);
-            String name = attribute.getNodeName();
-            if (name.startsWith("xmlns")) {
+            if (attribute.getNodeName().startsWith("xmlns")) {
                 continue;
             }
-            if (!firstAttribute) {
+            attributeNodes.add(attribute);
+        }
+        attributeNodes.sort(Comparator.comparing(Node::getNodeName));
+
+        for (int i = 0; i < attributeNodes.size(); i++) {
+            if (i > 0) {
                 builder.append(',');
             }
-            builder.append(attribute.getNodeValue());
-            firstAttribute = false;
+            builder.append(attributeNodes.get(i).getNodeValue());
         }
         builder.append(')');
 
+        List<Element> childElements = new ArrayList<>();
         NodeList children = element.getChildNodes();
         for (int i = 0; i < children.getLength(); i++) {
             Node child = children.item(i);
             if (child.getNodeType() == Node.ELEMENT_NODE) {
-                appendElementAndChildren((Element) child, builder);
+                childElements.add((Element) child);
             }
         }
+
+        childElements.sort(Comparator.comparing(Node::getNodeName));
+        for (Element childElement : childElements) {
+            builder.append(' ').append(buildElementString(childElement));
+        }
+
+        return builder.toString();
     }
 }
