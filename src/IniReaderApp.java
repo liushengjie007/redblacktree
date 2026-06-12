@@ -1,9 +1,11 @@
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Instant;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -12,6 +14,7 @@ import java.util.Optional;
 public class IniReaderApp {
     public static void main(String[] args) {
         Path iniPath = args.length > 0 ? Paths.get(args[0]) : Paths.get("config", "sample.ini");
+        Path outputPath = args.length > 1 ? Paths.get(args[1]) : Paths.get("config", "sample.generated.ini");
 
         try {
             IniData iniData = IniParser.parse(iniPath);
@@ -31,8 +34,12 @@ public class IniReaderApp {
             Optional<String> dbPort = iniData.get("database", "port");
             System.out.println("database.host -> " + dbHost.orElse("未配置"));
             System.out.println("database.port -> " + dbPort.orElse("未配置"));
+
+            IniData updatedData = iniData.with("app", "last.write.at", Instant.now().toString());
+            IniWriter.write(outputPath, updatedData);
+            System.out.println("已写入文件: " + outputPath.toAbsolutePath());
         } catch (IOException e) {
-            System.err.println("读取 ini 文件失败: " + e.getMessage());
+            System.err.println("处理 ini 文件失败: " + e.getMessage());
             System.exit(1);
         }
     }
@@ -99,6 +106,40 @@ public class IniReaderApp {
         }
     }
 
+    static final class IniWriter {
+        private IniWriter() {
+        }
+
+        static void write(Path path, IniData data) throws IOException {
+            if (path.getParent() != null) {
+                Files.createDirectories(path.getParent());
+            }
+
+            try (BufferedWriter writer = Files.newBufferedWriter(path, StandardCharsets.UTF_8)) {
+                boolean wroteAnySection = false;
+                for (Map.Entry<String, Map<String, String>> sectionEntry : data.sections().entrySet()) {
+                    String section = sectionEntry.getKey();
+                    Map<String, String> entries = sectionEntry.getValue();
+
+                    if (wroteAnySection) {
+                        writer.newLine();
+                    }
+
+                    if (!section.isEmpty()) {
+                        writer.write("[" + section + "]");
+                        writer.newLine();
+                    }
+
+                    for (Map.Entry<String, String> entry : entries.entrySet()) {
+                        writer.write(entry.getKey() + " = " + entry.getValue());
+                        writer.newLine();
+                    }
+                    wroteAnySection = true;
+                }
+            }
+        }
+    }
+
     static final class IniData {
         private final Map<String, Map<String, String>> sections;
 
@@ -120,6 +161,20 @@ public class IniReaderApp {
 
         Optional<String> get(String section, String key) {
             return Optional.ofNullable(sections.getOrDefault(section, Collections.emptyMap()).get(key));
+        }
+
+        IniData with(String section, String key, String value) {
+            if (key == null || key.trim().isEmpty()) {
+                throw new IllegalArgumentException("key 不能为空");
+            }
+
+            String sectionName = section == null ? "" : section.trim();
+            Map<String, Map<String, String>> copy = new LinkedHashMap<>();
+            for (Map.Entry<String, Map<String, String>> entry : sections.entrySet()) {
+                copy.put(entry.getKey(), new LinkedHashMap<>(entry.getValue()));
+            }
+            copy.computeIfAbsent(sectionName, ignored -> new LinkedHashMap<>()).put(key.trim(), value);
+            return new IniData(copy);
         }
     }
 }
