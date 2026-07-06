@@ -7,6 +7,7 @@
 3. 通过开发者指令约束 Agent：遇到需要仓库上下文/执行结果的任务时，主动读文件、搜代码、跑命令并基于结果继续决策  
 4. 支持多轮会话上下文，并将用户输入、模型输出、工具调用、工具结果、权限拒绝、错误信息统一写入会话历史  
 5. 提供内置命令：帮助、清空会话、查看/切换模型、查看状态、退出  
+6. 提供基础代码仓库操作能力（并限制在当前 git 仓库根目录内）：目录浏览、文件读取、文件匹配、内容搜索、文件写入/编辑、Shell 执行  
 
 ---
 
@@ -45,8 +46,21 @@ python3 codex_cli_agent.py \
 - `/model`：查看当前模型  
 - `/model <name>`：切换当前模型（下一轮生效）  
 - `/model list`：列出可用模型  
+- `/repo ...`：执行仓库工具命令（见下）  
 - `/status`：查看运行状态  
 - `/exit` 或 `/quit`：退出程序  
+
+### 仓库工具命令（`/repo`）
+
+- `/repo ls [path]`：目录浏览
+- `/repo read <file> [max_lines]`：读取文件
+- `/repo glob <pattern> [base]`：文件匹配（glob）
+- `/repo search <regex> [base] [--ignore-case]`：内容搜索
+- `/repo write <file> <content>`：文件写入（覆盖）
+- `/repo edit <file> <old> <new> [--all]`：文件编辑（替换）
+- `/repo sh <command> [--cwd path]`：执行 Shell 命令
+
+> 注意：`/repo` 的路径解析会被限制在当前 git 仓库根目录下，避免写到仓库外部。
 
 ---
 

@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -28,7 +30,13 @@ BASE_DEVELOPER_INSTRUCTIONS = """
 3) 在动手前先做简短说明，执行后给出关键结论和下一步。
 4) 对潜在风险操作保持谨慎，必要时请求权限确认并清楚说明原因。
 5) 回答保持准确、可执行，并尽量给出验证步骤。
+6) 你拥有并应当合理使用基础仓库操作能力：目录浏览、文件读取、文件匹配、内容搜索、文件写入/编辑、Shell 命令执行。
+7) 任何代码生成与修改都应落在当前 git 仓库工作区内。
 """.strip()
+
+MAX_FILE_READ_LINES = 300
+MAX_SEARCH_RESULTS = 120
+MAX_SHELL_OUTPUT_CHARS = 8000
 
 
 def now_iso() -> str:
@@ -103,6 +111,147 @@ class RuntimeState:
     last_usage: str = "-"
 
 
+class RepositoryTools:
+    """Basic repository operations restricted to git root."""
+
+    def __init__(self, repo_root: Path):
+        self.repo_root = repo_root.resolve()
+
+    def resolve_repo_path(self, raw_path: str) -> Path:
+        candidate = Path(raw_path)
+        if candidate.is_absolute():
+            resolved = candidate.resolve()
+        else:
+            resolved = (self.repo_root / candidate).resolve()
+        if not resolved.is_relative_to(self.repo_root):
+            raise ValueError(f"path escapes repo root: {raw_path}")
+        return resolved
+
+    def list_directory(self, raw_path: str = ".") -> dict[str, Any]:
+        path = self.resolve_repo_path(raw_path)
+        if not path.exists():
+            raise FileNotFoundError(f"not found: {path}")
+        if not path.is_dir():
+            raise NotADirectoryError(f"not a directory: {path}")
+
+        entries = sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        formatted = []
+        for entry in entries:
+            rel = entry.relative_to(self.repo_root)
+            marker = "/" if entry.is_dir() else ""
+            formatted.append(f"{rel}{marker}")
+        return {"path": str(path), "entries": formatted, "count": len(formatted)}
+
+    def read_file(self, raw_path: str, limit_lines: int = MAX_FILE_READ_LINES) -> dict[str, Any]:
+        path = self.resolve_repo_path(raw_path)
+        if not path.exists():
+            raise FileNotFoundError(f"not found: {path}")
+        if path.is_dir():
+            raise IsADirectoryError(f"is a directory: {path}")
+
+        text = path.read_text(encoding="utf-8", errors="replace")
+        lines = text.splitlines()
+        shown = lines[:limit_lines]
+        truncated = len(lines) > limit_lines
+        numbered = [f"{idx}|{line}" for idx, line in enumerate(shown, start=1)]
+        return {
+            "path": str(path),
+            "line_count": len(lines),
+            "content": "\n".join(numbered),
+            "truncated": truncated,
+        }
+
+    def match_files(self, pattern: str, raw_base: str = ".") -> dict[str, Any]:
+        base = self.resolve_repo_path(raw_base)
+        if not base.is_dir():
+            raise NotADirectoryError(f"not a directory: {base}")
+        matches = []
+        for path in base.rglob(pattern):
+            if ".git" in path.parts:
+                continue
+            matches.append(str(path.relative_to(self.repo_root)))
+        matches.sort()
+        return {"pattern": pattern, "base": str(base), "matches": matches, "count": len(matches)}
+
+    def search_content(self, pattern: str, raw_base: str = ".", ignore_case: bool = False) -> dict[str, Any]:
+        base = self.resolve_repo_path(raw_base)
+        if not base.is_dir():
+            raise NotADirectoryError(f"not a directory: {base}")
+
+        flags = re.IGNORECASE if ignore_case else 0
+        regex = re.compile(pattern, flags=flags)
+        hits: list[dict[str, Any]] = []
+
+        for path in sorted(base.rglob("*")):
+            if len(hits) >= MAX_SEARCH_RESULTS:
+                break
+            if not path.is_file():
+                continue
+            if ".git" in path.parts:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for lineno, line in enumerate(text.splitlines(), start=1):
+                if regex.search(line):
+                    hits.append(
+                        {
+                            "path": str(path.relative_to(self.repo_root)),
+                            "line": lineno,
+                            "text": line,
+                        }
+                    )
+                    if len(hits) >= MAX_SEARCH_RESULTS:
+                        break
+        return {
+            "pattern": pattern,
+            "base": str(base),
+            "hits": hits,
+            "count": len(hits),
+            "truncated": len(hits) >= MAX_SEARCH_RESULTS,
+        }
+
+    def write_file(self, raw_path: str, content: str) -> dict[str, Any]:
+        path = self.resolve_repo_path(raw_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return {"path": str(path), "bytes": len(content.encode("utf-8"))}
+
+    def edit_file(self, raw_path: str, old: str, new: str, replace_all: bool = False) -> dict[str, Any]:
+        path = self.resolve_repo_path(raw_path)
+        if not path.exists():
+            raise FileNotFoundError(f"not found: {path}")
+        original = path.read_text(encoding="utf-8", errors="replace")
+        if old not in original:
+            raise ValueError("old text not found")
+        updated = original.replace(old, new) if replace_all else original.replace(old, new, 1)
+        path.write_text(updated, encoding="utf-8")
+        replacement_count = original.count(old) if replace_all else 1
+        return {
+            "path": str(path),
+            "replace_all": replace_all,
+            "replacements": replacement_count,
+        }
+
+    def run_shell(self, command: str, raw_cwd: str = ".") -> dict[str, Any]:
+        cwd = self.resolve_repo_path(raw_cwd)
+        if not cwd.is_dir():
+            raise NotADirectoryError(f"not a directory: {cwd}")
+        proc = subprocess.run(
+            command,
+            shell=True,
+            cwd=str(cwd),
+            text=True,
+            capture_output=True,
+            timeout=120,
+        )
+        output = f"{proc.stdout}{proc.stderr}"
+        if len(output) > MAX_SHELL_OUTPUT_CHARS:
+            output = f"{output[:MAX_SHELL_OUTPUT_CHARS]}...(+{len(output) - MAX_SHELL_OUTPUT_CHARS} chars)"
+        return {"cwd": str(cwd), "command": command, "exit_code": proc.returncode, "output": output}
+
+
 class CodingAgentCLI:
     def __init__(
         self,
@@ -113,6 +262,8 @@ class CodingAgentCLI:
         developer_instructions: str,
     ) -> None:
         self.cwd = cwd
+        self.repo_root = self._detect_repo_root(cwd)
+        self.repo_tools = RepositoryTools(self.repo_root)
         self.sandbox = sandbox
         self.state = RuntimeState(current_model=model)
         self.history = SessionHistory(history_file)
@@ -129,6 +280,7 @@ class CodingAgentCLI:
 
         print("Codex Coding Agent CLI")
         print(f"cwd> {self.cwd}")
+        print(f"repo_root> {self.repo_root}")
         print(f"model> {self.state.current_model}")
         print(f"sandbox> {self.sandbox.value}")
         print(f"history> {self.history.path}")
@@ -138,6 +290,7 @@ class CodingAgentCLI:
             "session_started",
             {
                 "cwd": str(self.cwd),
+                "repo_root": str(self.repo_root),
                 "model": self.state.current_model,
                 "sandbox": self.sandbox.value,
             },
@@ -149,6 +302,27 @@ class CodingAgentCLI:
             self._codex.close()
         self.history.append("session_closed", {"reason": "user_exit"})
         self.state.status = "closed"
+
+    @staticmethod
+    def _detect_repo_root(start: Path) -> Path:
+        proc = subprocess.run(
+            ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
+            text=True,
+            capture_output=True,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return Path(proc.stdout.strip()).resolve()
+        return start
+
+    def _current_git_branch(self) -> str:
+        proc = subprocess.run(
+            ["git", "-C", str(self.repo_root), "rev-parse", "--abbrev-ref", "HEAD"],
+            text=True,
+            capture_output=True,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+        return "-"
 
     def _start_new_thread(self, clear_history: bool) -> None:
         if self._codex is None:
@@ -228,6 +402,10 @@ class CodingAgentCLI:
             self._print_status()
             return True
 
+        if cmd == "/repo":
+            self._handle_repo_command(args)
+            return True
+
         if cmd == "/model":
             if not args:
                 print(f"model> {self.state.current_model}")
@@ -258,14 +436,26 @@ class CodingAgentCLI:
   /model               查看当前模型
   /model <name>        切换当前模型（下一轮生效）
   /model list          列出当前可用模型
+  /repo ...            仓库工具（ls/read/glob/search/write/edit/sh）
   /status              查看当前运行状态
   /exit  或 /quit      退出程序
+
+/repo 子命令:
+  /repo ls [path]
+  /repo read <file> [max_lines]
+  /repo glob <pattern> [base]
+  /repo search <regex> [base] [--ignore-case]
+  /repo write <file> <content>
+  /repo edit <file> <old> <new> [--all]
+  /repo sh <command> [--cwd path]
 """.strip()
         )
 
     def _print_status(self) -> None:
         print("status>")
         print(f"  state: {self.state.status}")
+        print(f"  repo_root: {self.repo_root}")
+        print(f"  git_branch: {self._current_git_branch()}")
         print(f"  model: {self.state.current_model}")
         print(f"  thread: {self.state.thread_id}")
         print(f"  waiting_approval: {self.state.waiting_approval}")
@@ -273,6 +463,126 @@ class CodingAgentCLI:
         print(f"  last_error: {self.state.last_error or '-'}")
         print(f"  last_usage: {self.state.last_usage}")
         print(f"  session_history: {self.history.summary()}")
+
+    def _handle_repo_command(self, args: list[str]) -> None:
+        if not args:
+            print("repo.error> missing subcommand, use /help")
+            self.history.append("error", {"stage": "repo_command", "message": "missing subcommand"})
+            return
+
+        sub = args[0].lower()
+        call_info: dict[str, Any] = {"tool": sub, "args": args[1:]}
+        self.history.append("repo_tool_call", call_info)
+
+        try:
+            if sub == "ls":
+                target = args[1] if len(args) >= 2 else "."
+                result = self.repo_tools.list_directory(target)
+                print(f"repo.ls> {result['count']} entries")
+                for entry in result["entries"]:
+                    print(f"  {entry}")
+                self.history.append("repo_tool_result", {"tool": sub, "result": result})
+                return
+
+            if sub == "read":
+                if len(args) < 2:
+                    raise ValueError("usage: /repo read <file> [max_lines]")
+                max_lines = int(args[2]) if len(args) >= 3 else MAX_FILE_READ_LINES
+                result = self.repo_tools.read_file(args[1], max_lines)
+                print(f"repo.read> {result['path']} ({result['line_count']} lines)")
+                if result["content"]:
+                    print(result["content"])
+                if result["truncated"]:
+                    print(f"... truncated to {max_lines} lines")
+                self.history.append("repo_tool_result", {"tool": sub, "result": result})
+                return
+
+            if sub == "glob":
+                if len(args) < 2:
+                    raise ValueError("usage: /repo glob <pattern> [base]")
+                base = args[2] if len(args) >= 3 else "."
+                result = self.repo_tools.match_files(args[1], base)
+                print(f"repo.glob> {result['count']} matches")
+                for item in result["matches"]:
+                    print(f"  {item}")
+                self.history.append("repo_tool_result", {"tool": sub, "result": result})
+                return
+
+            if sub == "search":
+                if len(args) < 2:
+                    raise ValueError("usage: /repo search <regex> [base] [--ignore-case]")
+                ignore_case = "--ignore-case" in args
+                filtered = [x for x in args[1:] if x != "--ignore-case"]
+                pattern = filtered[0]
+                base = filtered[1] if len(filtered) >= 2 else "."
+                result = self.repo_tools.search_content(pattern, base, ignore_case=ignore_case)
+                print(f"repo.search> {result['count']} hits")
+                for hit in result["hits"]:
+                    print(f"  {hit['path']}:{hit['line']}:{hit['text']}")
+                if result["truncated"]:
+                    print(f"... truncated to first {MAX_SEARCH_RESULTS} hits")
+                self.history.append("repo_tool_result", {"tool": sub, "result": result})
+                return
+
+            if sub == "write":
+                if len(args) < 3:
+                    raise ValueError("usage: /repo write <file> <content>")
+                target = args[1]
+                content = " ".join(args[2:])
+                result = self.repo_tools.write_file(target, content)
+                print(f"repo.write> wrote {result['bytes']} bytes to {result['path']}")
+                self.history.append("repo_tool_result", {"tool": sub, "result": result})
+                return
+
+            if sub == "edit":
+                if len(args) < 4:
+                    raise ValueError("usage: /repo edit <file> <old> <new> [--all]")
+                replace_all = "--all" in args[4:]
+                result = self.repo_tools.edit_file(args[1], args[2], args[3], replace_all=replace_all)
+                print(
+                    f"repo.edit> {result['path']} replacements={result['replacements']} "
+                    f"(replace_all={result['replace_all']})"
+                )
+                self.history.append("repo_tool_result", {"tool": sub, "result": result})
+                return
+
+            if sub == "sh":
+                if len(args) < 2:
+                    raise ValueError("usage: /repo sh <command> [--cwd path]")
+                command_tokens = args[1:]
+                cwd = "."
+                if "--cwd" in command_tokens:
+                    idx = command_tokens.index("--cwd")
+                    if idx + 1 >= len(command_tokens):
+                        raise ValueError("usage: /repo sh <command> [--cwd path]")
+                    cwd = command_tokens[idx + 1]
+                    command_tokens = command_tokens[:idx]
+                if not command_tokens:
+                    raise ValueError("shell command cannot be empty")
+                command = " ".join(command_tokens)
+                result = self.repo_tools.run_shell(command, cwd)
+                print(f"repo.sh> exit={result['exit_code']} cwd={result['cwd']}")
+                if result["output"]:
+                    print(result["output"])
+                self.history.append("repo_tool_result", {"tool": sub, "result": result})
+                if result["exit_code"] != 0:
+                    self.history.append(
+                        "error",
+                        {
+                            "stage": "repo_shell",
+                            "message": f"non-zero exit: {result['exit_code']}",
+                            "command": command,
+                        },
+                    )
+                return
+
+            raise ValueError(f"unknown repo subcommand: {sub}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"repo.error> {exc}")
+            self.history.append(
+                "error",
+                {"stage": "repo_command", "tool": sub, "message": str(exc), "type": type(exc).__name__},
+            )
 
     def _list_models(self) -> None:
         if self._codex is None:
