@@ -8,6 +8,7 @@
 4. 支持多轮会话上下文，并将用户输入、模型输出、工具调用、工具结果、权限拒绝、错误信息统一写入会话历史  
 5. 提供内置命令：帮助、清空会话、查看/切换模型、查看状态、退出  
 6. 提供基础代码仓库操作能力（并限制在当前 git 仓库根目录内）：目录浏览、文件读取、文件匹配、内容搜索、文件写入/编辑、Shell 执行  
+7. 程序启动时自动执行 Codex 登录（可配置登录方式）  
 
 ---
 
@@ -34,8 +35,18 @@ python3 codex_cli_agent.py \
   --model gpt-5.4 \
   --sandbox workspace-write \
   --cwd . \
-  --history-file .codex_cli_session.jsonl
+  --history-file .codex_cli_session.jsonl \
+  --login-method auto
 ```
+
+登录参数：
+
+- `--login-method auto`（默认）：优先复用现有登录态；无登录态时优先尝试 API Key（环境变量），否则走 device-code 登录
+- `--login-method api-key`：强制 API Key 登录
+- `--login-method device-code`：强制设备码登录
+- `--login-method chatgpt`：强制浏览器登录
+- `--login-method none`：跳过启动登录
+- `--api-key-env OPENAI_API_KEY`：指定 API Key 环境变量名
 
 ---
 

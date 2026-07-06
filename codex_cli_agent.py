@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -21,6 +22,8 @@ from openai_codex.types import ThreadTokenUsageUpdatedNotification, TurnComplete
 
 DEFAULT_MODEL = "gpt-5.4"
 DEFAULT_HISTORY_FILE = ".codex_cli_session.jsonl"
+DEFAULT_LOGIN_METHOD = "auto"
+DEFAULT_API_KEY_ENV = "OPENAI_API_KEY"
 
 BASE_DEVELOPER_INSTRUCTIONS = """
 你是一个命令行 coding agent。
@@ -268,11 +271,15 @@ class CodingAgentCLI:
         sandbox: Sandbox,
         history_file: Path,
         developer_instructions: str,
+        login_method: str,
+        api_key_env: str,
     ) -> None:
         self.cwd = cwd
         self.repo_root = self._detect_repo_root(cwd)
         self.repo_tools = RepositoryTools(self.repo_root)
         self.sandbox = sandbox
+        self.login_method = login_method
+        self.api_key_env = api_key_env
         self.state = RuntimeState(current_model=model)
         self.history = SessionHistory(history_file)
         self._developer_instructions = developer_instructions
@@ -283,14 +290,17 @@ class CodingAgentCLI:
         self._latest_usage: ThreadTokenUsageUpdatedNotification | None = None
 
     def start(self) -> None:
+        self.history.clear()
         self._codex = Codex()
-        self._start_new_thread(clear_history=True)
+        self._authenticate_on_start()
+        self._start_new_thread(clear_history=False)
 
         print("Codex Coding Agent CLI")
         print(f"cwd> {self.cwd}")
         print(f"repo_root> {self.repo_root}")
         print(f"model> {self.state.current_model}")
         print(f"sandbox> {self.sandbox.value}")
+        print(f"login_method> {self.login_method}")
         print(f"history> {self.history.path}")
         print("输入 /help 查看内置命令。")
 
@@ -301,6 +311,7 @@ class CodingAgentCLI:
                 "repo_root": str(self.repo_root),
                 "model": self.state.current_model,
                 "sandbox": self.sandbox.value,
+                "login_method": self.login_method,
             },
         )
 
@@ -331,6 +342,138 @@ class CodingAgentCLI:
         if proc.returncode == 0 and proc.stdout.strip():
             return proc.stdout.strip()
         return "-"
+
+    def _authenticate_on_start(self) -> None:
+        if self._codex is None:
+            raise RuntimeError("Codex client not initialized")
+
+        method = self.login_method.lower()
+        self.history.append("login_started", {"method": method})
+        print(f"login.status> starting ({method})")
+
+        if method == "none":
+            print("login.status> skipped")
+            self.history.append("login_completed", {"method": method, "status": "skipped"})
+            return
+
+        if method == "auto":
+            state = self._inspect_login_state()
+            if state["authenticated"]:
+                print("login.status> already authenticated")
+                self.history.append("login_completed", {"method": method, "status": "reused", "state": state})
+                return
+
+            api_key = os.getenv(self.api_key_env, "").strip()
+            if api_key:
+                self._codex.login_api_key(api_key)
+                state = self._inspect_login_state()
+                if not state["authenticated"]:
+                    raise RuntimeError(f"api-key login failed: {state.get('error') or 'unknown'}")
+                print(f"login.status> authenticated via {self.api_key_env}")
+                self.history.append(
+                    "login_completed",
+                    {"method": "api-key", "status": "success", "env": self.api_key_env, "state": state},
+                )
+                return
+
+            # Terminal-first fallback when no reusable auth or API key is available.
+            self._login_via_device_code()
+            return
+
+        if method == "api-key":
+            api_key = os.getenv(self.api_key_env, "").strip()
+            if not api_key:
+                raise RuntimeError(
+                    f"missing API key env: {self.api_key_env}. "
+                    "Set it or use --login-method device-code/chatgpt."
+                )
+            self._codex.login_api_key(api_key)
+            state = self._inspect_login_state()
+            if not state["authenticated"]:
+                raise RuntimeError(f"api-key login failed: {state.get('error') or 'unknown'}")
+            print(f"login.status> authenticated via {self.api_key_env}")
+            self.history.append(
+                "login_completed",
+                {"method": method, "status": "success", "env": self.api_key_env, "state": state},
+            )
+            return
+
+        if method == "device-code":
+            self._login_via_device_code()
+            return
+
+        if method == "chatgpt":
+            self._login_via_chatgpt()
+            return
+
+        raise RuntimeError(f"unsupported login method: {self.login_method}")
+
+    def _inspect_login_state(self) -> dict[str, Any]:
+        if self._codex is None:
+            return {"authenticated": False, "error": "codex not initialized"}
+        try:
+            account_resp = self._codex.account(refresh_token=True)
+            account = getattr(account_resp, "account", None)
+            requires_openai_auth = bool(getattr(account_resp, "requires_openai_auth", False))
+            return {
+                "authenticated": (account is not None) and (not requires_openai_auth),
+                "account": account,
+                "requires_openai_auth": requires_openai_auth,
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"authenticated": False, "error": str(exc)}
+
+    def _login_via_device_code(self) -> None:
+        if self._codex is None:
+            raise RuntimeError("Codex client not initialized")
+        handle = self._codex.login_chatgpt_device_code()
+        print(f"login.device_code.url> {handle.verification_url}")
+        print(f"login.device_code.code> {handle.user_code}")
+        print("login.status> waiting for device-code confirmation...")
+        self.history.append(
+            "login_challenge",
+            {
+                "method": "device-code",
+                "verification_url": handle.verification_url,
+                "user_code": handle.user_code,
+            },
+        )
+        result = handle.wait()
+        if not getattr(result, "success", False):
+            error = getattr(result, "error", None) or "unknown login error"
+            self.history.append("error", {"stage": "login_device_code", "message": error})
+            raise RuntimeError(f"device-code login failed: {error}")
+        state = self._inspect_login_state()
+        print("login.status> authenticated via device-code")
+        self.history.append(
+            "login_completed",
+            {"method": "device-code", "status": "success", "login_id": handle.login_id, "state": state},
+        )
+
+    def _login_via_chatgpt(self) -> None:
+        if self._codex is None:
+            raise RuntimeError("Codex client not initialized")
+        handle = self._codex.login_chatgpt()
+        print(f"login.chatgpt.url> {handle.auth_url}")
+        print("login.status> waiting for browser login confirmation...")
+        self.history.append(
+            "login_challenge",
+            {
+                "method": "chatgpt",
+                "auth_url": handle.auth_url,
+            },
+        )
+        result = handle.wait()
+        if not getattr(result, "success", False):
+            error = getattr(result, "error", None) or "unknown login error"
+            self.history.append("error", {"stage": "login_chatgpt", "message": error})
+            raise RuntimeError(f"chatgpt login failed: {error}")
+        state = self._inspect_login_state()
+        print("login.status> authenticated via chatgpt")
+        self.history.append(
+            "login_completed",
+            {"method": "chatgpt", "status": "success", "login_id": handle.login_id, "state": state},
+        )
 
     def _start_new_thread(self, clear_history: bool) -> None:
         if self._codex is None:
@@ -464,6 +607,8 @@ class CodingAgentCLI:
         print(f"  state: {self.state.status}")
         print(f"  repo_root: {self.repo_root}")
         print(f"  git_branch: {self._current_git_branch()}")
+        print(f"  login_method: {self.login_method}")
+        print(f"  api_key_env: {self.api_key_env}")
         print(f"  model: {self.state.current_model}")
         print(f"  thread: {self.state.thread_id}")
         print(f"  waiting_approval: {self.state.waiting_approval}")
@@ -959,6 +1104,17 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Extra developer instructions appended to the default behavior contract",
     )
+    parser.add_argument(
+        "--login-method",
+        default=DEFAULT_LOGIN_METHOD,
+        choices=["auto", "api-key", "device-code", "chatgpt", "none"],
+        help="Codex login method used at startup",
+    )
+    parser.add_argument(
+        "--api-key-env",
+        default=DEFAULT_API_KEY_ENV,
+        help=f"Environment variable name for API key login (default: {DEFAULT_API_KEY_ENV})",
+    )
     return parser.parse_args()
 
 
@@ -985,6 +1141,8 @@ def main() -> int:
         sandbox=sandbox_from_arg(args.sandbox),
         history_file=history_file,
         developer_instructions=developer_instructions,
+        login_method=args.login_method,
+        api_key_env=args.api_key_env,
     )
     try:
         app.start()
