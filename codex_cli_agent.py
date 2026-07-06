@@ -37,6 +37,7 @@ BASE_DEVELOPER_INSTRUCTIONS = """
 MAX_FILE_READ_LINES = 300
 MAX_SEARCH_RESULTS = 120
 MAX_SHELL_OUTPUT_CHARS = 8000
+MAX_SEARCH_FILE_BYTES = 1_000_000
 
 
 def now_iso() -> str:
@@ -189,10 +190,17 @@ class RepositoryTools:
                 continue
             if ".git" in path.parts:
                 continue
+            if "__pycache__" in path.parts:
+                continue
             try:
-                text = path.read_text(encoding="utf-8", errors="replace")
+                if path.stat().st_size > MAX_SEARCH_FILE_BYTES:
+                    continue
+                raw = path.read_bytes()
             except OSError:
                 continue
+            if b"\x00" in raw[:2048]:
+                continue
+            text = raw.decode("utf-8", errors="replace")
             for lineno, line in enumerate(text.splitlines(), start=1):
                 if regex.search(line):
                     hits.append(
