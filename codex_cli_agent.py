@@ -350,21 +350,43 @@ class CodingAgentCLI:
         method = self.login_method.lower()
         self.history.append("login_started", {"method": method})
         print(f"login.status> starting ({method})")
-
-        if method == "none":
-            print("login.status> skipped")
-            self.history.append("login_completed", {"method": method, "status": "skipped"})
-            return
-
-        if method == "auto":
-            state = self._inspect_login_state()
-            if state["authenticated"]:
-                print("login.status> already authenticated")
-                self.history.append("login_completed", {"method": method, "status": "reused", "state": state})
+        try:
+            if method == "none":
+                print("login.status> skipped")
+                self.history.append("login_completed", {"method": method, "status": "skipped"})
                 return
 
-            api_key = os.getenv(self.api_key_env, "").strip()
-            if api_key:
+            if method == "auto":
+                state = self._inspect_login_state()
+                if state["authenticated"]:
+                    print("login.status> already authenticated")
+                    self.history.append("login_completed", {"method": method, "status": "reused", "state": state})
+                    return
+
+                api_key = os.getenv(self.api_key_env, "").strip()
+                if api_key:
+                    self._codex.login_api_key(api_key)
+                    state = self._inspect_login_state()
+                    if not state["authenticated"]:
+                        raise RuntimeError(f"api-key login failed: {state.get('error') or 'unknown'}")
+                    print(f"login.status> authenticated via {self.api_key_env}")
+                    self.history.append(
+                        "login_completed",
+                        {"method": "api-key", "status": "success", "env": self.api_key_env, "state": state},
+                    )
+                    return
+
+                # Terminal-first fallback when no reusable auth or API key is available.
+                self._login_via_device_code()
+                return
+
+            if method == "api-key":
+                api_key = os.getenv(self.api_key_env, "").strip()
+                if not api_key:
+                    raise RuntimeError(
+                        f"missing API key env: {self.api_key_env}. "
+                        "Set it or use --login-method device-code/chatgpt."
+                    )
                 self._codex.login_api_key(api_key)
                 state = self._inspect_login_state()
                 if not state["authenticated"]:
@@ -372,41 +394,26 @@ class CodingAgentCLI:
                 print(f"login.status> authenticated via {self.api_key_env}")
                 self.history.append(
                     "login_completed",
-                    {"method": "api-key", "status": "success", "env": self.api_key_env, "state": state},
+                    {"method": method, "status": "success", "env": self.api_key_env, "state": state},
                 )
                 return
 
-            # Terminal-first fallback when no reusable auth or API key is available.
-            self._login_via_device_code()
-            return
+            if method == "device-code":
+                self._login_via_device_code()
+                return
 
-        if method == "api-key":
-            api_key = os.getenv(self.api_key_env, "").strip()
-            if not api_key:
-                raise RuntimeError(
-                    f"missing API key env: {self.api_key_env}. "
-                    "Set it or use --login-method device-code/chatgpt."
-                )
-            self._codex.login_api_key(api_key)
-            state = self._inspect_login_state()
-            if not state["authenticated"]:
-                raise RuntimeError(f"api-key login failed: {state.get('error') or 'unknown'}")
-            print(f"login.status> authenticated via {self.api_key_env}")
-            self.history.append(
-                "login_completed",
-                {"method": method, "status": "success", "env": self.api_key_env, "state": state},
+            if method == "chatgpt":
+                self._login_via_chatgpt()
+                return
+
+            raise RuntimeError(f"unsupported login method: {self.login_method}")
+        except Exception as exc:  # noqa: BLE001
+            message = (
+                f"startup login failed ({method}): {exc}. "
+                f"Set {self.api_key_env}, or use --login-method none for offline testing."
             )
-            return
-
-        if method == "device-code":
-            self._login_via_device_code()
-            return
-
-        if method == "chatgpt":
-            self._login_via_chatgpt()
-            return
-
-        raise RuntimeError(f"unsupported login method: {self.login_method}")
+            self.history.append("error", {"stage": "startup_login", "message": message})
+            raise RuntimeError(message) from exc
 
     def _inspect_login_state(self) -> dict[str, Any]:
         if self._codex is None:

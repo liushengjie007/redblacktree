@@ -48,6 +48,8 @@ python3 codex_cli_agent.py \
 - `--login-method none`：跳过启动登录
 - `--api-key-env OPENAI_API_KEY`：指定 API Key 环境变量名
 
+> 如果网络受限导致登录失败，可设置 API Key 环境变量后使用 `auto/api-key`，或在离线调试时临时使用 `--login-method none`。
+
 ---
 
 ## 内置命令
